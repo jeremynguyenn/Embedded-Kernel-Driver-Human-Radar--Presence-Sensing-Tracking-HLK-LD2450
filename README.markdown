@@ -39,6 +39,77 @@ This project provides an enhanced Linux kernel driver for the Hi-Link LD2450 rad
 - `gcc` and `dtc` (Device Tree Compiler)
 - Raspberry Pi or STM32 hardware with LD2450 module connected via UART
 
+### Flowchart Structure
+```
+[Start]
+   |
+   v
+[Probe Function (ld2450_probe)]
+   | Initialize data structures (ld2450_data, mutex, kfifo, input_dev)
+   | Allocate GPIO (power-gpios)
+   | Open serdev (UART)
+   | Enable Runtime PM
+   | Call ld2450_init_module
+   |
+   v
+[Initialize Module (ld2450_init_module)]
+   | Power on (ld2450_power_on via GPIO)
+   | Configure module (ld2450_setup_module)
+   |   - Enter command mode (CMD_SET_ENABLE_CONFIG)
+   |   - Set baud rate (256000)
+   |   - Get firmware version
+   |   - Get MAC address
+   |   - Disable Bluetooth
+   |   - Set single-target tracking
+   |   - Exit command mode (reset)
+   | Create sysfs attributes
+   | Create debugfs entries
+   | Initialize workqueue
+   |
+   v
+[UART Data Reception (ld2450_recv)]
+   | Receive UART data into kfifo
+   | If mode == LD2450_MODE_TRACKING:
+   |   Check for valid tracking frame (0xAAFF0300...0x55CC)
+   |   Queue tracking_work if valid
+   | Else:
+   |   Store data in kfifo for command mode
+   | Signal data_ready completion
+   |
+   v
+[Process Tracking Data (ld2450_tracking_work)]
+   | Acquire Runtime PM
+   | Read frame from kfifo
+   | If valid frame:
+   |   Parse frame (ld2450_parse_tracking_frame)
+   |   Update x_pos, y_pos, velocity, distance
+   |   Report to input_dev (ABS_X, ABS_Y, ABS_RX)
+   | Release Runtime PM
+   |
+   v
+[User-Space Interaction]
+   | Read tracking data via:
+   |   - sysfs (/sys/.../tracking_data)
+   |   - ioctl (LD2450_IOC_GET_TRACKING)
+   |   - debugfs (/sys/kernel/debug/ld2450/raw_data)
+   | Set mode via ioctl (LD2450_IOC_SET_MODE)
+   |
+   v
+[Power Management]
+   | If idle for 5s (LD2450_RPM_AUTOSUSPEND_DELAY):
+   |   Runtime suspend (ld2450_runtime_suspend)
+   |     - Power off (ld2450_power_off via GPIO)
+   | On activity:
+   |   Runtime resume (ld2450_runtime_resume)
+   |     - Power on (ld2450_power_on)
+   | System suspend/resume:
+   |   - ld2450_suspend: Close serdev, power off
+   |   - ld2450_resume: Power on, reopen serdev, reconfigure
+   |
+   v
+[End]
+```
+
 ### Build Commands
 ```bash
 # Build everything (kernel module, Device Tree overlays, user app)
