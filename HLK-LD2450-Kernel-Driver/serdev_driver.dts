@@ -1,0 +1,26 @@
+//old
+/dts-v1/;
+
+/ {
+    compatible = "brcm,bcm2835"; /* Compatible with Raspberry Pi */
+    /* compatible = "st,stm32"; */ /* Uncomment for STM32 */
+
+    /* Define node for UART0 */
+    &uart0 {
+        status = "okay";
+
+        /* Node for LD2450 module */
+        ld2450: radar@0 {
+            compatible = "hilink,ld2450"; /* Must match of_device_id in LD2450.c */
+            status = "okay";
+            power-gpios = <&gpio 18 1>; /* GPIO18, active-high for power control */
+            baud-rate = <256000>; /* Default baud rate for LD2450 */
+            wakeup-source; /* Support device wake-up */
+        };
+    };
+
+    /* Define GPIO controller (platform-dependent) */
+    &gpio {
+        status = "okay";
+    };
+};

@@ -1,0 +1,21 @@
+/dts-v1/;
+/plugin/;
+
+/ {
+    compatible = "brcm,bcm2835"; /* Compatible with Raspberry Pi */
+
+    fragment@0 {
+        target = <&uart0>;
+        __overlay__ {
+            status = "okay";
+
+            ld2450: radar@0 {
+                compatible = "hilink,ld2450"; /* Must match of_device_id in LD2450.c */
+                status = "okay";
+                power-gpios = <&gpio 18 1>; /* GPIO18, active-high */
+                baud-rate = <256000>; /* Default baud rate */
+                wakeup-source; /* Support device wake-up */
+            };
+        };
+    };
+};
