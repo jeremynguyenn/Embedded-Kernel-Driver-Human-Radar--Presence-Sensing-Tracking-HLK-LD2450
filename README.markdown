@@ -1,8 +1,13 @@
 # LD2450 Radar Module Driver
 
+<img width="300" height="168" alt="image" src="https://github.com/user-attachments/assets/7173d589-83c8-4ce1-a64b-1fbb72111f8d" />
+<img width="225" height="225" alt="image" src="https://github.com/user-attachments/assets/03454da8-fded-42ca-87dc-85a3640dd0f3" />
+
+
 This project provides an enhanced Linux kernel driver for the Hi-Link LD2450 radar module, along with supporting Device Tree files, a user application, and a comprehensive `Makefile` for building and deployment. The driver supports UART communication via `serdev`, power management, and advanced features like workqueues, debugfs, sysfs, and ioctls.
 
 ## Project Components
+<img width="244" height="206" alt="image" src="https://github.com/user-attachments/assets/d30c8725-130e-4171-a738-0ef40bae2ba3" />
 
 1. **Kernel Driver (LD2450.c, LD2450.h)**:
    - **Purpose**: Controls the LD2450 radar module via UART, processing tracking data (x, y, velocity, distance) and reporting via input events.
