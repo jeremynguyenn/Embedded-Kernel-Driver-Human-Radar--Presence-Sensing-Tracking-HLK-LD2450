@@ -1,6 +1,6 @@
 # LD2450 Radar Module Driver
 
-<img width="300" height="168" alt="image" src="https://github.com/user-attachments/assets/7173d589-83c8-4ce1-a64b-1fbb72111f8d" />
+<img width="500" height="300" alt="image" src="https://github.com/user-attachments/assets/7173d589-83c8-4ce1-a64b-1fbb72111f8d" />
 <img width="225" height="225" alt="image" src="https://github.com/user-attachments/assets/03454da8-fded-42ca-87dc-85a3640dd0f3" />
 
 
