@@ -1,0 +1,41 @@
+/dts-v1/;
+/plugin/;
+
+/*
+ * Device Tree Source for Hi-Link LD2450 radar module
+ * Purpose: Defines hardware configuration for UART and GPIO on Raspberry Pi
+ * Role in Driver:
+ *   - Binds the driver to the device via compatible string "hilink,ld2450"
+ *   - Configures UART (uart0) and GPIO (power-gpios) for the radar module
+ *   - Uses Device Tree overlay for Raspberry Pi
+ * Device Tree Syntax:
+ *   - Uses /plugin/ for Raspberry Pi overlay support
+ *   - Defines compatible string for platform detection
+ *   - Configures UART and GPIO nodes
+ * Changelog:
+ *   - 2.3.2: Removed STM32 support, optimized for Raspberry Pi
+ */
+
+/ {
+    compatible = "brcm,bcm2835";
+
+    /* Fragment for overlay support */
+    fragment@0 {
+        target = <&uart0>;
+        __overlay__ {
+            status = "okay";
+
+            ld2450: radar@0 {
+                compatible = "hilink,ld2450";
+                status = "okay";
+                power-gpios = <&gpio 18 1>; /* GPIO18, active-high */
+                baud-rate = <256000>;
+                wakeup-source;
+            };
+        };
+    };
+
+    &gpio {
+        status = "okay";
+    };
+};
