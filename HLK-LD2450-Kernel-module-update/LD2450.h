@@ -2,26 +2,25 @@
 /*
  * LD2450.h - Header file for Hi-Link LD2450 radar module driver
  * Author: Nguyen Nhan
- * Date: 1st September 2025
- * Version: 2.3.3
+ * Date: 22nd September 2025
+ * Version: 2.4.0
  * Description: Advanced kernel driver for HLK-LD2450 radar module over UART (serdev) on Raspberry Pi
- * Features: Input events, sysfs, PM, parsing, workqueues, debugfs, ioctls, POSIX IPC
+ * Features: Input events, sysfs, debugfs, PM, parsing, workqueues, ioctls, POSIX IPC, kernel threads, block device
  * Driver Types:
  *   - Character device: Implemented via miscdevice (/dev/ld2450) for user-space interaction
  *   - Input device: Reports tracking data (X, Y, velocity) via input subsystem
  *   - Serdev driver: Handles UART communication for the LD2450 module
- *   - Other types (not used): Block devices (for storage), Network devices (for networking), USB/PCI (for specific hardware)
+ *   - Block device: Simulated block device interface for learning purposes
  * Memory Management:
- *   - Kernel: Uses kmalloc/devm_kzalloc for small, contiguous memory allocations
+ *   - Kernel: Uses kmalloc/devm_kzalloc for small allocations, vmalloc for large buffers
  *   - User-space: Uses malloc/calloc/realloc for dynamic memory (see LD2450_app.c)
- *   - Virtual Memory: Kernel allocations are mapped to virtual address space via MMU
- *   - Note: No swapping or complex page table management in this driver due to small memory footprint
+ *   - Virtual Memory: Kernel allocations mapped via MMU; supports page faults via vmalloc
+ * Race Conditions:
+ *   - Protected by spinlock (atomic ops), mutex (blocking ops), and semaphores
+ *   - Test cases: Added in ld2450_core.c for race condition simulation
  * Changelog:
- *   - 2.2.0: Added POSIX message queue, thread synchronization, and modularized structure
- *   - 2.3.0: Added comments for driver types and memory management
- *   - 2.3.1: Added comments for other driver types and virtual memory
- *   - 2.3.2: Removed STM32 support, optimized for Raspberry Pi
- *   - 2.3.3: Added open_count for concurrent open limiting, updated file operations
+ *   - 2.3.3: Added open_count, updated file ops
+ *   - 2.4.0: Added kernel semaphore, block device struct, virtual memory details, race condition tests
  */
 
 #ifndef __LD2450_H__
@@ -41,6 +40,9 @@
 #include <linux/debugfs.h>
 #include <linux/ioctl.h>
 #include <linux/mqueue.h>
+#include <linux/semaphore.h>
+#include <linux/kthread.h>
+#include <linux/blkdev.h>
 
 /* Debug flags */
 #define LD2450_DEBUG 0
@@ -52,11 +54,13 @@
 #define LD2450_RETRY_COUNT 3
 #define LD2450_TRACKING_BUFF_SIZE 32
 #define LD2450_MAX_MESSAGE_SIZE 64
-#define LD2450_FRAME_SIZE 30  /* Tracking frame size */
+#define LD2450_FRAME_SIZE 30
 #define LD2450_DEVICE_NAME "ld2450"
 #define LD2450_MQ_NAME "/ld2450_mq"
 #define LD2450_MQ_MAXMSG 10
 #define LD2450_MQ_MSGSIZE sizeof(struct ld2450_tracking_data)
+#define LD2450_BLOCK_MAJOR 240
+#define LD2450_BLOCK_MINORS 1
 
 /* Protocol definitions */
 #define PROTOCOL_START 0xFDFCFBFA
@@ -90,6 +94,12 @@ struct ld2450_tracking_data {
     unsigned short distance;
 };
 
+/* Block device structure (simulated) */
+struct ld2450_block_dev {
+    struct gendisk *disk;
+    struct request_queue *queue;
+};
+
 /* Driver data structure */
 struct ld2450_data {
     struct serdev_device *serdev;
@@ -98,31 +108,34 @@ struct ld2450_data {
     DECLARE_KFIFO(fifo, u8, LD2450_FIFO_SIZE);
     spinlock_t ld2450_lock;
     struct mutex fifo_lock;
+    struct semaphore data_sem;
     struct completion data_ready;
     struct input_dev *input_dev;
     struct gpio_desc *power_gpio;
     struct workqueue_struct *workqueue;
     struct work_struct tracking_work;
+    struct task_struct *tracking_thread;
     struct dentry *debugfs_root;
+    struct ld2450_block_dev block_dev;
     u8 mode;
     u8 fw_version[16];
     u8 mac_addr[12];
     u8 tracking_mode;
     bool powered;
     bool wakeup_enabled;
-    /* Parsed tracking data */
     s16 x_pos, y_pos, velocity;
     u16 distance;
-    /* POSIX message queue */
+    u32 error_count;
+    u32 fifo_usage;
     struct mq_attr mq_attr;
     mqd_t mq;
-    /* Open counter */
     unsigned int open_count;
 };
 
 /* Function prototypes - Core */
 int ld2450_init_module(struct ld2450_data *data);
 int ld2450_setup_module(struct ld2450_data *data);
+int ld2450_race_test(struct ld2450_data *data);
 
 /* Function prototypes - Power Management */
 int ld2450_power_on(struct ld2450_data *data);
@@ -157,5 +170,9 @@ ssize_t ld2450_write(struct file *file, const char __user *buf, size_t count, lo
 loff_t ld2450_llseek(struct file *file, loff_t offset, int whence);
 long ld2450_ioctl(struct file *file, unsigned int cmd, unsigned long arg);
 unsigned int ld2450_poll(struct file *file, struct poll_table_struct *wait);
+
+/* Function prototypes - Block Device */
+int ld2450_create_block_dev(struct ld2450_data *data);
+void ld2450_remove_block_dev(struct ld2450_data *data);
 
 #endif /* __LD2450_H__ */

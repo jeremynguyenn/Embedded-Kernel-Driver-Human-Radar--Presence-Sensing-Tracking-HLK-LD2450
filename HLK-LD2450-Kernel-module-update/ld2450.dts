@@ -7,19 +7,19 @@
  * Role in Driver:
  *   - Binds the driver to the device via compatible string "hilink,ld2450"
  *   - Configures UART (uart0) and GPIO (power-gpios) for the radar module
- *   - Uses Device Tree overlay for Raspberry Pi
+ *   - Adds platform device node for alternative driver binding
  * Device Tree Syntax:
  *   - Uses /plugin/ for Raspberry Pi overlay support
  *   - Defines compatible string for platform detection
- *   - Configures UART and GPIO nodes
  * Changelog:
- *   - 2.3.2: Removed STM32 support, optimized for Raspberry Pi
+ *   - 2.3.2: Optimized for Raspberry Pi
+ *   - 2.4.0: Added platform device node
  */
 
 / {
     compatible = "brcm,bcm2835";
 
-    /* Fragment for overlay support */
+    /* Fragment for UART overlay */
     fragment@0 {
         target = <&uart0>;
         __overlay__ {
@@ -28,9 +28,20 @@
             ld2450: radar@0 {
                 compatible = "hilink,ld2450";
                 status = "okay";
-                power-gpios = <&gpio 18 1>; /* GPIO18, active-high */
+                power-gpios = <&gpio 18 1>;
                 baud-rate = <256000>;
                 wakeup-source;
+            };
+        };
+    };
+
+    /* Fragment for platform device */
+    fragment@1 {
+        target-path = "/";
+        __overlay__ {
+            ld2450_platform: ld2450-platform {
+                compatible = "hilink,ld2450-platform";
+                status = "okay";
             };
         };
     };

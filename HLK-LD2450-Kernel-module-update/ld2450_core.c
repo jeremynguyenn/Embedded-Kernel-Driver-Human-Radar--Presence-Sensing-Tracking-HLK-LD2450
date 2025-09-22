@@ -2,26 +2,18 @@
 /*
  * ld2450_core.c - Core driver for Hi-Link LD2450 radar module
  * Author: Nguyen Nhan
- * Date: 1st September 2025
- * Version: 2.3.3
+ * Date: 22nd September 2025
+ * Version: 2.4.0
  * Description: Core probe, remove, and initialization logic for Raspberry Pi
  * Workflow:
- *   - Probe: Allocates resources, sets up serdev, GPIO, input device, sysfs, debugfs
- *   - File Operations: Provides /dev/ld2450 interface for user-space (blocking and non-blocking)
+ *   - Probe: Allocates resources, sets up serdev, GPIO, input, sysfs, debugfs, block device
+ *   - File Operations: Supports /dev/ld2450 with full operations (lseek added)
  *   - Power Management: Handles suspend/resume and runtime PM
- *   - Serial Communication: Manages UART via serdev
- *   - IPC: Uses POSIX message queue for tracking data
- * File Operations:
- *   - open: Initializes file access, non-blocking, limits concurrent opens
- *   - read: Reads tracking data, protected by spinlock for atomicity
- *   - write: Sends commands to device, uses mutex for blocking synchronization
- *   - poll: Supports asynchronous I/O by waiting for new data
+ *   - Kernel Thread: Processes tracking data
+ *   - Race Condition: Test via sysfs attribute
  * Changelog:
- *   - 2.2.0: Modularized driver, added POSIX message queue
- *   - 2.3.0: Added module_param, full file operations, spinlock
- *   - 2.3.1: Added retry logic, poll, string module param, blocking/non-blocking comments
- *   - 2.3.2: Removed STM32 support, optimized for Raspberry Pi
- *   - 2.3.3: Added poll() implementation, enhanced release(), added open counter
+ *   - 2.3.3: Added poll, enhanced release, open counter
+ *   - 2.4.0: Added kernel thread, lseek, race test, signal handling
  */
 
 #include <linux/module.h>
@@ -33,10 +25,11 @@
 #include <linux/uaccess.h>
 #include <linux/spinlock.h>
 #include <linux/poll.h>
+#include <linux/vmalloc.h>
 #include "LD2450.h"
 
-#define LD2450_VERSION "2.3.3"
-#define LD2450_MAX_OPENS 5 /* Maximum concurrent file opens */
+#define LD2450_VERSION "2.4.0"
+#define LD2450_MAX_OPENS 5
 
 static int ld2450_baud_rate = LD2450_DEFAULT_BAUD_RATE;
 module_param(ld2450_baud_rate, int, 0644);
@@ -48,6 +41,20 @@ MODULE_PARM_DESC(ld2450_device_name, "Device name for LD2450 driver");
 
 static struct ld2450_data *ld2450_global_data;
 static DEFINE_SPINLOCK(ld2450_lock);
+
+static int ld2450_tracking_thread(void *arg)
+{
+    struct ld2450_data *data = arg;
+    while (!kthread_should_stop()) {
+        if (signal_pending(current)) {
+            dev_info(data->dev, "Thread interrupted by signal\n");
+            break;
+        }
+        schedule_work(&data->tracking_work);
+        msleep(100);
+    }
+    return 0;
+}
 
 static int ld2450_open(struct inode *inode, struct file *file)
 {
@@ -144,54 +151,100 @@ static ssize_t ld2450_write(struct file *file, const char __user *buf, size_t co
 
 static loff_t ld2450_llseek(struct file *file, loff_t offset, int whence)
 {
-    return no_llseek(file, offset, whence);
+    struct ld2450_data *data = file->private_data;
+    loff_t newpos;
+
+    switch (whence) {
+    case SEEK_SET:
+        newpos = offset;
+        break;
+    case SEEK_CUR:
+        newpos = file->f_pos + offset;
+        break;
+    case SEEK_END:
+        newpos = LD2450_TRACKING_BUFF_SIZE - offset;
+        break;
+    default:
+        return -EINVAL;
+    }
+
+    if (newpos < 0 || newpos > LD2450_TRACKING_BUFF_SIZE)
+        return -EINVAL;
+
+    file->f_pos = newpos;
+    return newpos;
 }
 
 static long ld2450_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
     struct ld2450_data *data = file->private_data;
     struct ld2450_tracking_data tracking;
-    int mode;
     int ret;
 
     switch (cmd) {
     case LD2450_IOC_SET_MODE:
-        if (copy_from_user(&mode, (int __user *)arg, sizeof(int)))
+        if (copy_from_user(&data->mode, (void __user *)arg, sizeof(int)))
             return -EFAULT;
-        data->mode = mode;
         break;
     case LD2450_IOC_GET_TRACKING:
-        spin_lock(&ld2450_lock);
+        spin_lock(&data->ld2450_lock);
         tracking.x_pos = data->x_pos;
         tracking.y_pos = data->y_pos;
         tracking.velocity = data->velocity;
         tracking.distance = data->distance;
-        spin_unlock(&ld2450_lock);
+        spin_unlock(&data->ld2450_lock);
         if (copy_to_user((void __user *)arg, &tracking, sizeof(tracking)))
             return -EFAULT;
         break;
     default:
-        return -ENOTTY;
+        return -EINVAL;
     }
 
     return 0;
 }
 
-static const struct file_operations ld2450_fops = {
-    .owner = THIS_MODULE,
-    .open = ld2450_open,
-    .release = ld2450_release,
-    .read = ld2450_read,
-    .write = ld2450_write,
-    .llseek = ld2450_llseek,
-    .unlocked_ioctl = ld2450_ioctl,
-    .poll = ld2450_poll,
-};
+static ssize_t race_test_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+    struct ld2450_data *data = dev_get_drvdata(dev);
+    return scnprintf(buf, PAGE_SIZE, "Race test result: %d\n", data->race_test_result);
+}
+
+static ssize_t race_test_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
+{
+    struct ld2450_data *data = dev_get_drvdata(dev);
+    int ret = ld2450_race_test(data);
+    data->race_test_result = ret;
+    return count;
+}
+
+static DEVICE_ATTR_RW(race_test);
+
+static int ld2450_race_test(struct ld2450_data *data)
+{
+    unsigned long flags1, flags2;
+    int value = 0;
+
+    spin_lock_irqsave(&data->ld2450_lock, flags1);
+    spin_lock_irqsave(&data->ld2450_lock, flags2); /* Simulate deadlock */
+    value = data->x_pos;
+    spin_unlock_irqrestore(&data->ld2450_lock, flags2);
+    spin_unlock_irqrestore(&data->ld2450_lock, flags1);
+    return value;
+}
 
 static struct miscdevice ld2450_misc = {
     .minor = MISC_DYNAMIC_MINOR,
     .name = LD2450_DEVICE_NAME,
-    .fops = &ld2450_fops,
+    .fops = &(struct file_operations){
+        .owner = THIS_MODULE,
+        .open = ld2450_open,
+        .release = ld2450_release,
+        .read = ld2450_read,
+        .write = ld2450_write,
+        .llseek = ld2450_llseek,
+        .unlocked_ioctl = ld2450_ioctl,
+        .poll = ld2450_poll,
+    },
 };
 
 static int ld2450_probe(struct serdev_device *serdev)
@@ -203,16 +256,15 @@ static int ld2450_probe(struct serdev_device *serdev)
     if (!data)
         return -ENOMEM;
 
-    data->serdev = serdev;
     data->dev = &serdev->dev;
-    data->miscdevice = ld2450_misc;
-    data->open_count = 0; /* Initialize open counter */
+    data->serdev = serdev;
     serdev_device_set_drvdata(serdev, data);
     ld2450_global_data = data;
 
     INIT_KFIFO(data->fifo);
-    spin_lock_init(&ld2450_lock);
+    spin_lock_init(&data->ld2450_lock);
     mutex_init(&data->fifo_lock);
+    sema_init(&data->data_sem, 1);
     init_completion(&data->data_ready);
 
     data->power_gpio = devm_gpiod_get(data->dev, "power", GPIOD_OUT_LOW);
@@ -227,11 +279,19 @@ static int ld2450_probe(struct serdev_device *serdev)
         return -ENOMEM;
     }
 
+    data->tracking_thread = kthread_run(ld2450_tracking_thread, data, "ld2450_thread");
+    if (IS_ERR(data->tracking_thread)) {
+        dev_err(data->dev, "Failed to create kernel thread\n");
+        destroy_workqueue(data->workqueue);
+        return PTR_ERR(data->tracking_thread);
+    }
+
     INIT_WORK(&data->tracking_work, ld2450_tracking_work);
 
     ret = ld2450_create_input(data);
     if (ret) {
         dev_err(data->dev, "Failed to create input device: %d\n", ret);
+        kthread_stop(data->tracking_thread);
         destroy_workqueue(data->workqueue);
         return ret;
     }
@@ -240,6 +300,17 @@ static int ld2450_probe(struct serdev_device *serdev)
     if (ret) {
         dev_err(data->dev, "Failed to initialize message queue: %d\n", ret);
         ld2450_remove_input(data);
+        kthread_stop(data->tracking_thread);
+        destroy_workqueue(data->workqueue);
+        return ret;
+    }
+
+    ret = ld2450_create_block_dev(data);
+    if (ret) {
+        dev_err(data->dev, "Failed to create block device: %d\n", ret);
+        ld2450_cleanup_mq(data);
+        ld2450_remove_input(data);
+        kthread_stop(data->tracking_thread);
         destroy_workqueue(data->workqueue);
         return ret;
     }
@@ -247,8 +318,10 @@ static int ld2450_probe(struct serdev_device *serdev)
     ret = serdev_device_open(serdev);
     if (ret) {
         dev_err(data->dev, "Failed to open serdev: %d\n", ret);
+        ld2450_remove_block_dev(data);
         ld2450_cleanup_mq(data);
         ld2450_remove_input(data);
+        kthread_stop(data->tracking_thread);
         destroy_workqueue(data->workqueue);
         return ret;
     }
@@ -267,7 +340,9 @@ static int ld2450_probe(struct serdev_device *serdev)
     ret = ld2450_init_module(data);
     if (ret) {
         serdev_device_close(serdev);
+        ld2450_remove_block_dev(data);
         ld2450_remove_input(data);
+        kthread_stop(data->tracking_thread);
         pm_runtime_disable(data->dev);
         return ret;
     }
@@ -276,7 +351,9 @@ static int ld2450_probe(struct serdev_device *serdev)
     if (ret) {
         ld2450_cleanup_mq(data);
         serdev_device_close(serdev);
+        ld2450_remove_block_dev(data);
         ld2450_remove_input(data);
+        kthread_stop(data->tracking_thread);
         pm_runtime_disable(data->dev);
         return ret;
     }
@@ -286,18 +363,36 @@ static int ld2450_probe(struct serdev_device *serdev)
         ld2450_remove_sysfs(data);
         ld2450_cleanup_mq(data);
         serdev_device_close(serdev);
+        ld2450_remove_block_dev(data);
         ld2450_remove_input(data);
+        kthread_stop(data->tracking_thread);
         pm_runtime_disable(data->dev);
         return ret;
     }
 
-    ld2450_misc.name = ld2450_device_name;
-    ret = misc_register(&ld2450_misc);
+    ret = device_create_file(data->dev, &dev_attr_race_test);
     if (ret) {
+        ld2450_remove_debugfs(data);
         ld2450_remove_sysfs(data);
         ld2450_cleanup_mq(data);
         serdev_device_close(serdev);
+        ld2450_remove_block_dev(data);
         ld2450_remove_input(data);
+        kthread_stop(data->tracking_thread);
+        pm_runtime_disable(data->dev);
+        return ret;
+    }
+
+    ret = misc_register(&ld2450_misc);
+    if (ret) {
+        device_remove_file(data->dev, &dev_attr_race_test);
+        ld2450_remove_debugfs(data);
+        ld2450_remove_sysfs(data);
+        ld2450_cleanup_mq(data);
+        serdev_device_close(serdev);
+        ld2450_remove_block_dev(data);
+        ld2450_remove_input(data);
+        kthread_stop(data->tracking_thread);
         pm_runtime_disable(data->dev);
         return ret;
     }
@@ -310,10 +405,13 @@ static void ld2450_remove(struct serdev_device *serdev)
     struct ld2450_data *data = serdev_device_get_drvdata(serdev);
 
     misc_deregister(&ld2450_misc);
+    device_remove_file(data->dev, &dev_attr_race_test);
     destroy_workqueue(data->workqueue);
+    kthread_stop(data->tracking_thread);
     ld2450_remove_sysfs(data);
     ld2450_remove_debugfs(data);
     ld2450_cleanup_mq(data);
+    ld2450_remove_block_dev(data);
     ld2450_power_off(data);
     ld2450_remove_input(data);
     serdev_device_close(serdev);
@@ -322,6 +420,7 @@ static void ld2450_remove(struct serdev_device *serdev)
 
 static const struct of_device_id ld2450_of_match[] = {
     { .compatible = "hilink,ld2450" },
+    { .compatible = "hilink,ld2450-platform" },
     { }
 };
 MODULE_DEVICE_TABLE(of, ld2450_of_match);

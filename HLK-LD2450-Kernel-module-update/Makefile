@@ -1,23 +1,26 @@
 # Makefile for Hi-Link LD2450 radar module driver
-# Purpose: Builds kernel module, Device Tree overlay, user-space application, and documentation for Raspberry Pi
+# Purpose: Builds kernel module, Device Tree overlay, user-space apps, and documentation for Raspberry Pi
 # Targets:
-#   - all: Builds module, Device Tree, app, and README
+#   - all: Builds module, Device Tree, apps, and README
 #   - module: Compiles kernel module
 #   - dt: Compiles Device Tree overlay (dtbo)
-#   - app: Builds user-space application
+#   - app: Builds user-space application (LD2450_app)
+#   - test: Builds test suite (ld2450_test)
 #   - readme: Copies README to build directory
 #   - install: Installs module and Device Tree overlay
-#   - test: Tests module loading
+#   - test-driver: Tests module loading
+#   - test-race: Tests race condition handling
 #   - backup: Backs up existing files
 #   - clean: Cleans build artifacts
 #   - check-tools: Verifies required tools (gcc, dtc)
 #   - version: Generates version file
 # Changelog:
-#   - 2.3.2: Removed STM32 support, optimized for Raspberry Pi
+#   - 2.3.2: Optimized for Raspberry Pi
+#   - 2.4.0: Added block device, race condition test, network driver, tracepoints, test suite
 
 # Define kernel modules to build
 obj-m += ld2450.o
-ld2450-y := ld2450_core.o ld2450_serial.o ld2450_power.o ld2450_sysfs.o ld2450_input.o ld2450_debugfs.o
+ld2450-y := ld2450_core.o ld2450_serial.o ld2450_power.o ld2450_sysfs.o ld2450_input.o ld2450_debugfs.o ld2450_block.o ld2450_net.o ld2450_trace.o
 
 # Define variables
 KERNEL_DIR ?= /lib/modules/$(shell uname -r)/build
@@ -25,9 +28,10 @@ PWD := $(shell pwd)
 CC := gcc
 DTC := dtc
 APP := LD2450_app
+TEST := ld2450_test
 DTS_FILES := ld2450.dts
 DTBO_FILES := ld2450.dtbo
-VERSION := 2.3.2
+VERSION := 2.4.0
 CFLAGS := -g -O2 -Wall -pthread
 KCFLAGS := -DCONFIG_LD2450_DEBUG=$(LD2450_DEBUG)
 LD2450_DEBUG ?= 0
@@ -35,7 +39,7 @@ LDFLAGS := -pthread -lrt
 
 MAKEFLAGS += -j$(shell nproc)
 
-all: check-tools dt app module readme
+all: check-tools dt app test module readme
 
 module:
 	@echo "Building kernel module..."
@@ -49,6 +53,10 @@ $(DTBO_FILES): %.dtbo: %.dts
 app: $(APP).c
 	@echo "Building user application $(APP)..."
 	$(CC) $(CFLAGS) -o $(APP) $(APP).c $(LDFLAGS) -lm
+
+test: $(TEST).c
+	@echo "Building test suite $(TEST)..."
+	$(CC) $(CFLAGS) -o $(TEST) $(TEST).c $(LDFLAGS)
 
 readme:
 	@echo "Copying README..."
@@ -65,7 +73,7 @@ install: module dt
 	@depmod -a
 	@echo "Add 'dtoverlay=ld2450' to /boot/config.txt for Raspberry Pi overlay"
 
-test: install
+test-driver: install
 	@echo "Testing kernel module..."
 	@if lsmod | grep -q ld2450; then \
 		echo "Unloading existing ld2450 module..."; \
@@ -74,7 +82,11 @@ test: install
 	@echo "Loading ld2450 module..."
 	@sudo insmod $(PWD)/ld2450.ko
 	@echo "Module loaded. Check 'dmesg' for logs."
-	@echo "Run './$(APP)' to test user application."
+	@echo "Run './$(APP)' or './$(TEST)' to test applications."
+
+test-race:
+	@echo "Testing race condition handling..."
+	@sudo sh -c "echo 1 > /sys/devices/platform/ld2450/race_test"
 
 backup:
 	@echo "Backing up existing files..."
@@ -88,7 +100,7 @@ backup:
 clean:
 	@echo "Cleaning up..."
 	$(MAKE) -C $(KERNEL_DIR) M=$(PWD) clean
-	rm -f $(DTBO_FILES) $(APP) README.md
+	rm -f $(DTBO_FILES) $(APP) $(TEST) README.md
 	rm -f *.o *.ko *.mod *.mod.c *.symvers *.order .*.cmd
 	rm -rf .tmp_versions
 
@@ -103,4 +115,4 @@ version:
 	@echo "$(VERSION)" > version.txt
 	@echo "Driver version: $(VERSION)"
 
-.PHONY: all module dt app readme install test backup clean check-tools version
+.PHONY: all module dt app test readme install test-driver test-race backup clean check-tools version

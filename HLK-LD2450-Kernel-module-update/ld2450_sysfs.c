@@ -2,21 +2,20 @@
 /*
  * ld2450_sysfs.c - Sysfs and debugfs interfaces for Hi-Link LD2450 radar module
  * Author: Nguyen Nhan
- * Date: 1st September 2025
- * Version: 2.3.2
+ * Date: 22nd September 2025
+ * Version: 2.4.0
  * Description: Manages sysfs attributes and debugfs entries for Raspberry Pi
  * Sysfs Attributes:
- *   - fw_version: Displays firmware version of the LD2450 module
- *   - mac_addr: Displays MAC address of the module
+ *   - fw_version: Displays firmware version (read-only)
+ *   - mac_addr: Displays MAC address (read-only)
  *   - tracking_data: Displays current tracking data (X, Y, velocity, distance)
- *   - Note: Provides user-space access to device attributes via /sys/devices/.../ld2450
+ *   - tracking_mode: Configures tracking mode (read/write)
+ *   - stats: Displays error count and FIFO usage
  * Debugfs:
  *   - raw_data: Provides raw UART data for debugging
  * Changelog:
- *   - 2.2.0: Added memory allocation debugging
- *   - 2.3.0: Separated debugfs from sysfs
- *   - 2.3.1: Added detailed comments about sysfs attributes
  *   - 2.3.2: Optimized for Raspberry Pi
+ *   - 2.4.0: Added write support for tracking_mode, added stats attribute
  */
 
 #include <linux/sysfs.h>
@@ -47,6 +46,33 @@ static ssize_t tracking_data_show(struct device *dev, struct device_attribute *a
 }
 
 static DEVICE_ATTR_RO(tracking_data);
+
+static ssize_t tracking_mode_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+    struct ld2450_data *data = dev_get_drvdata(dev);
+    return scnprintf(buf, PAGE_SIZE, "%u\n", data->tracking_mode);
+}
+
+static ssize_t tracking_mode_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
+{
+    struct ld2450_data *data = dev_get_drvdata(dev);
+    unsigned int mode;
+    if (kstrtouint(buf, 10, &mode) < 0)
+        return -EINVAL;
+    data->tracking_mode = mode;
+    return count;
+}
+
+static DEVICE_ATTR_RW(tracking_mode);
+
+static ssize_t stats_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+    struct ld2450_data *data = dev_get_drvdata(dev);
+    return scnprintf(buf, PAGE_SIZE, "Errors=%u, FIFO_Used=%u, FIFO_Free=%u\n",
+                     data->error_count, kfifo_len(&data->fifo), kfifo_avail(&data->fifo));
+}
+
+static DEVICE_ATTR_RO(stats);
 
 static const struct file_operations debugfs_raw_data_fops = {
     .owner = THIS_MODULE,
@@ -79,6 +105,25 @@ int ld2450_create_sysfs(struct ld2450_data *data)
         return ret;
     }
 
+    ret = device_create_file(data->dev, &dev_attr_tracking_mode);
+    if (ret) {
+        dev_err(data->dev, "Failed to create tracking_mode sysfs\n");
+        device_remove_file(data->dev, &dev_attr_fw_version);
+        device_remove_file(data->dev, &dev_attr_mac_addr);
+        device_remove_file(data->dev, &dev_attr_tracking_data);
+        return ret;
+    }
+
+    ret = device_create_file(data->dev, &dev_attr_stats);
+    if (ret) {
+        dev_err(data->dev, "Failed to create stats sysfs\n");
+        device_remove_file(data->dev, &dev_attr_fw_version);
+        device_remove_file(data->dev, &dev_attr_mac_addr);
+        device_remove_file(data->dev, &dev_attr_tracking_data);
+        device_remove_file(data->dev, &dev_attr_tracking_mode);
+        return ret;
+    }
+
     return 0;
 }
 
@@ -87,6 +132,8 @@ void ld2450_remove_sysfs(struct ld2450_data *data)
     device_remove_file(data->dev, &dev_attr_fw_version);
     device_remove_file(data->dev, &dev_attr_mac_addr);
     device_remove_file(data->dev, &dev_attr_tracking_data);
+    device_remove_file(data->dev, &dev_attr_tracking_mode);
+    device_remove_file(data->dev, &dev_attr_stats);
 }
 
 int ld2450_create_debugfs(struct ld2450_data *data)
@@ -103,6 +150,9 @@ int ld2450_create_debugfs(struct ld2450_data *data)
         return -ENOMEM;
     }
 
+    debugfs_create_u32("error_count", 0444, data->debugfs_root, &data->error_count);
+    debugfs_create_u32("fifo_usage", 0444, data->debugfs_root, &data->fifo_usage);
+
     return 0;
 }
 
@@ -114,4 +164,4 @@ void ld2450_remove_debugfs(struct ld2450_data *data)
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Nguyen Nhan");
 MODULE_DESCRIPTION("Sysfs and debugfs for Hi-Link LD2450 radar module on Raspberry Pi");
-MODULE_VERSION(LD2450_VERSION);
+MODULE_VERSION("2.4.0");
